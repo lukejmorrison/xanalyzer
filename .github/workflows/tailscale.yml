@@ -1,0 +1,24 @@
+name: Update Tailscale ACLs
+
+on:
+  push:
+    paths:
+      - 'tailscale/acls.json'
+    branches:
+      - main
+
+jobs:
+  update-acls:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Update Tailscale ACLs
+        uses: tailscale/github-action@main
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          acls: tailscale/acls.json
