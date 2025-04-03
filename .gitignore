@@ -1,1 +1,6 @@
 /backup/
+/src/.venv/
+/src/node_modules/
+/src/app.log
+/test.log
+.env
