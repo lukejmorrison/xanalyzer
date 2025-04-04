@@ -1,5 +1,17 @@
 #!/bin/bash
 
+# Check if the script is run with sudo
+if [[ $EUID -eq 0 ]]; then
+  echo "Error: This script should not be run with sudo."
+  exit 1
+fi
+
+# Check if the script is run in the correct directory
+if [[ $(pwd) != "/opt/xanalyzer" ]]; then
+  echo "Error: This script must be run in /opt/xanalyzer directory."
+  exit 1
+fi
+
 # Function to check if a command is installed
 command_exists() {
   command -v "$1" >/dev/null 2>&1
@@ -37,6 +49,50 @@ python_dependency_installed() {
   pip3 show "$dependency" > /dev/null 2>&1
 }
 
+# Function to create the virtual environment
+create_virtual_environment() {
+  echo "Creating virtual environment..."
+  python3 -m venv /opt/xanalyzer/src/.venv
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to create virtual environment."
+    return 1
+  fi
+  echo "Virtual environment created successfully."
+  
+  # Install python dependencies in the virtual environment
+  source /opt/xanalyzer/src/.venv/bin/activate
+  echo "Installing Python dependencies..."
+  pip3 install --upgrade pip
+  required_python_dependencies=("tweepy" "requests")
+  for dependency in "${required_python_dependencies[@]}"; do
+    if ! python_dependency_installed "$dependency"; then
+      echo "Installing $dependency..."
+      pip3 install "$dependency"
+      if [ $? -ne 0 ]; then
+        echo "Error: Failed to install $dependency"
+        deactivate
+        return 1
+      fi
+    fi
+  done
+  echo "Python dependencies installed successfully."
+  return 0
+}
+
+# Function to install node dependencies
+install_node_dependencies() {
+  echo "Installing Node.js dependencies..."
+  cd /opt/xanalyzer/src/
+  npm install
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to install Node.js dependencies."
+    return 1
+  fi
+  cd ..
+  echo "Node.js dependencies installed successfully."
+  return 0
+}
+
 # Function to check dependencies
 check_dependencies() {
   echo "Checking dependencies..."
@@ -65,7 +121,10 @@ check_dependencies() {
 
   # Check for node_modules
   if ! directory_exists "/opt/xanalyzer/src/node_modules"; then
-    echo "Warning: node_modules/ not found. Run 'npm install' in /opt/xanalyzer/src/"
+    echo "Warning: node_modules/ not found."
+    if ! install_node_dependencies; then
+      return 1
+    fi
   fi
 
   # Check for .env
@@ -94,8 +153,13 @@ check_dependencies() {
 
   # Check for virtual environment
   if ! directory_exists "/opt/xanalyzer/src/.venv"; then
-    echo "Warning: Virtual environment not found. Run 'python3 -m venv .venv' in /opt/xanalyzer/src/"
+    if ! create_virtual_environment; then
+      return 1
+    fi
   fi
+  
+  # Activate the virtual environment
+  source /opt/xanalyzer/src/.venv/bin/activate
 
   # Check if virtual environment is activated
   if ! virtual_environment_activated; then
@@ -123,7 +187,7 @@ check_dependencies() {
   required_node_dependencies=("axios" "dotenv" "express" "express-session" "winston")
   for dependency in "${required_node_dependencies[@]}"; do
     if ! node_dependency_installed "/opt/xanalyzer/src/package.json" "$dependency"; then
-      echo "Error: Node.js dependency '$dependency' is missing or not correctly defined in package.json. Run 'npm install' in /opt/xanalyzer/src/"
+      echo "Error: Node.js dependency '$dependency' is missing or not correctly defined in package.json."
       return 1
     fi
   done
@@ -133,10 +197,35 @@ check_dependencies() {
   required_python_dependencies=("tweepy" "requests")
   for dependency in "${required_python_dependencies[@]}"; do
     if ! python_dependency_installed "$dependency"; then
-      echo "Error: Python dependency '$dependency' is missing. Run 'pip3 install $dependency' in the activated virtual environment."
+      echo "Error: Python dependency '$dependency' is missing."
       return 1
     fi
   done
+
+  # Check for certificate and key files (check symbolic links and readability)
+  echo "Checking for certificate and key files..."
+  CERT_PATH="/etc/letsencrypt/live/xanalyzer.wizwam.com/fullchain.pem"
+  KEY_PATH="/etc/letsencrypt/live/xanalyzer.wizwam.com/privkey.pem"
+  
+  if ! file_exists "$CERT_PATH"; then
+    echo "Error: Certificate symbolic link $CERT_PATH not found."
+    return 1
+  fi
+  if ! [ -r "$CERT_PATH" ]; then
+    echo "Error: Cannot read certificate file $CERT_PATH. Check permissions."
+    echo "Current permissions: $(ls -l $CERT_PATH)"
+    echo "Directory permissions: $(ls -ld /etc/letsencrypt/live/xanalyzer.wizwam.com/)"
+    return 1
+  fi
+  if ! file_exists "$KEY_PATH"; then
+    echo "Error: Key symbolic link $KEY_PATH not found."
+    return 1
+  fi
+  if ! [ -r "$KEY_PATH" ]; then
+    echo "Warning: Cannot read private key file $KEY_PATH. May not be needed if Nginx handles it."
+    echo "Current permissions: $(ls -l $KEY_PATH)"
+    echo "Directory permissions: $(ls -ld /etc/letsencrypt/live/xanalyzer.wizwam.com/)"
+  fi
 
   echo "All dependencies appear to be installed."
   return 0
@@ -146,4 +235,7 @@ check_dependencies() {
 check_dependencies
 
 # Exit with the correct code
+if [ $? -eq 0 ]; then
+  deactivate
+fi
 exit $?
