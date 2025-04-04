@@ -1,0 +1,189 @@
+require('dotenv').config();
+const express = require('express');
+const https = require('https'); // Import the https module
+const fs = require('fs'); // Import the fs module
+const axios = require('axios');
+const session = require('express-session');
+const crypto = require('crypto');
+const winston = require('winston'); // Import winston
+const app = express();
+
+// Configure winston logger
+const logger = winston.createLogger({
+    level: 'info',
+    format: winston.format.combine(
+        winston.format.timestamp(),
+        winston.format.printf(({ timestamp, level, message }) => {
+            return `${timestamp} [${level.toUpperCase()}]: ${message}`;
+        })
+    ),
+    transports: [
+        new winston.transports.Console(),
+        new winston.transports.File({ filename: 'app.log' })
+    ]
+});
+
+// Log server start
+logger.info('Starting xanalyzer server...');
+
+// Session middleware setup
+app.use(session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: { secure: true, httpOnly: true } // Set to true for HTTPS
+}));
+
+// OAuth configuration
+const clientId = process.env.CLIENT_ID;
+const redirectUri = 'https://xanalyzer.wizwam.com/callback'; // Update with your actual redirect URI (HTTPS)
+
+// Generate PKCE code verifier
+function generateCodeVerifier() {
+    return crypto.randomBytes(32).toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '');
+}
+
+// Generate PKCE code challenge
+function generateCodeChallenge(verifier) {
+    return crypto.createHash('sha256')
+        .update(verifier)
+        .digest('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=/g, '');
+}
+
+// Login route to initiate OAuth
+app.get('/login', (req, res) => {
+    logger.info('Received request to /login');
+    const codeVerifier = generateCodeVerifier();
+    const codeChallenge = generateCodeChallenge(codeVerifier);
+    req.session.codeVerifier = codeVerifier;
+
+    const authUrl = `https://twitter.com/i/oauth2/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=${codeChallenge}&code_challenge_method=S256`;
+    logger.info(`Redirecting to X authorization URL: ${authUrl}`);
+    res.redirect(authUrl);
+});
+
+// Callback route for OAuth token exchange
+app.get('/callback', async (req, res) => {
+    logger.info('Received request to /callback');
+    const code = req.query.code;
+    const codeVerifier = req.session.codeVerifier;
+
+    if (!code || !codeVerifier) {
+        logger.error('Missing code or codeVerifier in /callback');
+        res.send(`
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Authentication Callback</title>
+            </head>
+            <body>
+                <h1>Authentication in Progress</h1>
+                <p>This page is part of the authentication process. If you landed here directly, please start over.</p>
+                <a href="/login">Start Authentication</a>
+                <script>console.log('Missing code or codeVerifier in /callback');</script>
+            </body>
+            </html>
+        `);
+    } else {
+        try {
+            logger.info('Exchanging authorization code for access token...');
+            const tokenResponse = await axios.post('https://api.x.com/oauth2/token', {
+                grant_type: 'authorization_code',
+                code: code,
+                redirect_uri: redirectUri,
+                client_id: clientId,
+                code_verifier: codeVerifier
+            }, {
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+            });
+
+            const { access_token, refresh_token } = tokenResponse.data;
+            req.session.accessToken = access_token;
+            req.session.refreshToken = refresh_token;
+            logger.info('Successfully exchanged authorization code for access token.');
+            res.redirect('/');
+        } catch (error) {
+            logger.error(`Token exchange failed: ${error.response?.data || error.message}`);
+            res.status(500).send('Authentication failed');
+        }
+    }
+});
+
+// New route to get the access token
+app.get('/get_token', (req, res) => {
+    logger.info('Received request to /get_token');
+    if (req.session.accessToken) {
+        logger.info('Returning access token.');
+        res.json({ access_token: req.session.accessToken });
+    } else {
+        logger.warn('No access token found in session.');
+        res.status(401).send('Not authenticated');
+    }
+});
+
+// Main page
+app.get('/', (req, res) => {
+    logger.info('Received request to /');
+    if (req.session.accessToken) {
+        logger.info('User is authenticated.');
+        res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>xanalyzer</title>
+        </head>
+        <body>
+            <h1>Welcome to xanalyzer!</h1>
+            <p>You are authenticated.</p>
+            <script>console.log('User is authenticated.');</script>
+        </body>
+        </html>
+        `);
+    } else {
+        logger.info('User is not authenticated.');
+        res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>xanalyzer</title>
+        </head>
+        <body>
+            <h1>Welcome to xanalyzer!</h1>
+            <p>Please <a href="/login">login</a> to access xanalyzer.</p>
+            <script>console.log('User is not authenticated.');</script>
+        </body>
+        </html>
+        `);
+    }
+});
+
+// Load certificate and key
+const certPath = '/etc/letsencrypt/live/xanalyzer.wizwam.com/fullchain.pem'; // Replace with your cert path if different
+const keyPath = '/etc/letsencrypt/live/xanalyzer.wizwam.com/privkey.pem'; // Replace with your key path if different
+
+const httpsOptions = {
+    cert: fs.readFileSync(certPath),
+    key: fs.readFileSync(keyPath),
+};
+
+// Create HTTPS server
+const httpsServer = https.createServer(httpsOptions, app);
+
+// Start the HTTPS server
+const httpsPort = 443;
+httpsServer.listen(httpsPort, () => {
+    logger.info(`HTTPS server listening on port ${httpsPort}`);
+    console.log(`HTTPS server listening on port ${httpsPort}`);
+});

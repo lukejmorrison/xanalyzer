@@ -1,7 +1,7 @@
 module.exports = {
     apps: [{
       name: 'xanalyzer-app',
-      script: 'src/app.js',
+      script: 'app.js',
       instances: 1,
       autorestart: true,
       watch: false,
